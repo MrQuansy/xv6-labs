@@ -15,6 +15,10 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+extern int reference[PHYSTOP/PGSIZE];
+
+extern struct spinlock ref_lock;
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -308,20 +312,26 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    if(*pte & PTE_W) {
+        *pte &= ~PTE_W;
+        *pte |= PTE_COW;
+    }
+
     pa = PTE2PA(*pte);
+
+    acquire(&ref_lock);
+    reference[pa/PGSIZE] += 1;
+    release(&ref_lock);
+
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
   }
@@ -355,9 +365,18 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+      if (va0 >= MAXVA)
+          return -1;
+      pte_t* pte = walk(pagetable, va0, 0);
+      if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+          return -1;
+      if (*pte & PTE_COW) {
+          // process cow page
+          if (cowhandler(pagetable, va0) < 0) {
+              return -1;
+          }
+      }
+    pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -436,4 +455,33 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int cowhandler(pagetable_t pagetable, uint64 rval) {
+    if (rval >= MAXVA) {
+        return -1;
+    }
+    pte_t* pte = walk(pagetable, rval, 0);
+    if (pte == 0 || !(*pte & PTE_COW)) {
+        return -1;
+    }
+
+    char *mem;
+    if ((mem = kalloc()) == 0) {
+        return -1;
+    }
+    // old physical address
+    uint64 pa = PTE2PA(*pte);
+    // copy old data to new mem
+    memmove((char*)mem, (char*)pa, PGSIZE);
+    // PAY ATTENTION
+    // decrease the reference count of old memory page, because a new page has been allocated
+    kfree((void*)pa);
+    uint flags = PTE_FLAGS(*pte);
+    // set PTE_W to 1, change the address pointed to by PTE to new memory page(mem)
+    *pte = (PA2PTE(mem) | flags | PTE_W);
+    // set PTE_RSW to 0
+    *pte &= ~PTE_COW;
+
+    return 0;
 }
