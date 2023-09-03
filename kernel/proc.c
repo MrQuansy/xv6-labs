@@ -319,6 +319,13 @@ fork(void)
   release(&wait_lock);
 
   acquire(&np->lock);
+
+  for(int i = 0; i < VMASIZE; i ++) {
+      memmove((void*)&np->vma[i], (void*)&p->vma[i], sizeof(p->vma[i]));
+      if(p->vma[i].valid == 1)
+          filedup(p->vma[i].f);
+    }
+
   np->state = RUNNABLE;
   release(&np->lock);
 
@@ -359,6 +366,17 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+
+    for(int i = 0; i > VMASIZE; i ++)
+    {
+        if(p->vma[i].valid == 1)
+        {
+            uint64 length = p->vma[i].length;
+            fileclose(p->vma[i].f);
+            mmapunmap(p->pagetable, p->vma[i].st, PGROUNDUP(length) / PGSIZE, 1);
+            memset((void*)&p->vma[i], 0, sizeof(p->vma[i]));
+        }
+    }
 
   begin_op();
   iput(p->cwd);

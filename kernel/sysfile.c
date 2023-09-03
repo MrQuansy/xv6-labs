@@ -506,10 +506,92 @@ sys_pipe(void)
 
 uint64
 sys_mmap(void){
-    return 0;
+    uint64 addr;
+    int length, prot, flags, fd, offset;
+    struct file* f;
+    uint64 error = -1;
+
+    argaddr(0, &addr);
+    argint(1, &length);
+    argint(2, &prot);
+    argint(3, &flags);
+    argfd(4, &fd, &f);
+    argint(5, &offset);
+
+    if(!f->writable && (prot & PROT_WRITE) && (flags == MAP_SHARED))
+        return error;
+
+    struct proc *p = myproc();
+    for(int i = 0; i < VMASIZE; i ++)
+    {
+        struct vma * v = &p -> vmas[i];
+        if(v.valid == 0)
+        {
+            v.valid = 1;
+            v.f = f;
+            v.flags = flags;
+            v.offset = offset;
+            v.prot = prot;
+            v.length = length;
+            v.st = PGROUNDUP(p->sz);
+            v.ed = PGROUNDUP(p->sz) + PGROUNDUP(length);
+            p->sz = PGROUNDUP(length) + PGROUNDUP(p->sz);
+            filedup(f);
+            return v->st;
+        }
+    }
+
+    return error;
 }
 
 uint64
 sys_munmap(void){
+    uint64 addr;
+    int length;
+
+    argaddr(0, &addr);
+    argint(0, &length);
+
+    struct proc * p = myproc();
+    struct vma * v = 0;
+
+    int idx = -1;
+
+    for(int i = 0; i < VMASIZE; ++i) {
+        if(p -> vma[i].valid && addr >= p -> vma[i].st
+           && addr <= p -> vma[i].ed) {
+            idx = i;
+            v = &p->vma[i];
+            break;
+        }
+    }
+
+    if(idx == -1) return -1;
+
+    addr = PGROUNDDOWN(addr);
+    length = PGROUNDUP(length);
+
+    if(v -> flags & MAP_SHARED) {
+        if(filewrite(v -> f, addr, length) < 0) {
+            printf("munmap: filewrite < 0\n");
+        }
+    }
+
+    //删除虚拟页表项释放物理页
+
+    uvmunmap(p -> pagetable, addr, length/PGSIZE, 1);
+
+    if(addr == v->st){
+        v->st += length;
+        v->offset += length;
+    }
+
+    v->length -= length;
+    if(v->length == 0)
+    {
+        fileclose(v->f);
+        memset(v, 0, sizeof(p->vma[idx]));
+    }
+
     return 0;
 }
